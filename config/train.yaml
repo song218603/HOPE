@@ -1,0 +1,7 @@
+MANO:
+  DATA_DIR: _DATA/data/
+  MODEL_PATH: data/mano
+  GENDER: neutral
+  NUM_HAND_JOINTS: 15
+  MEAN_PARAMS: data/mano_mean_params.npz
+  CREATE_BODY_POSE: false
