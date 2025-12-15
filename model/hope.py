@@ -62,7 +62,8 @@ class HOPE(pl.LightningModule):
 
 
 if __name__ == '__main__':
-    net = HOPE().cuda()
-    x = torch.randn(1, 3, 224, 224).cuda()
+    net = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
+    net.to('cuda')
+    x = torch.randn(1, 3, 490, 644).cuda()
 
     print(net(x).shape)
