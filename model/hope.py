@@ -20,6 +20,9 @@ class HOPE(pl.LightningModule):
         self.cfg = cfg
 
         self.backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        self.backbone.eval()
 
         # Instantiate MANO model
         mano_cfg = {k.lower(): v for k,v in dict(cfg.MANO).items()}
@@ -32,7 +35,6 @@ class HOPE(pl.LightningModule):
 
     def get_parameters(self):
         all_params = list(self.mano_head.parameters())
-        all_params += list(self.backbone.parameters())
         return all_params
     
     def configure_optimizers(self) -> Tuple[torch.optim.Optimizer, torch.optim.Optimizer]:
@@ -51,6 +53,11 @@ class HOPE(pl.LightningModule):
                                             weight_decay=self.cfg.TRAIN.WEIGHT_DECAY)
 
         return optimizer, optimizer_disc
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode:
+            self.backbone.eval()
     
     def forward_step(self, batch : Dict, train : bool = False) -> Dict:
         x = batch["image"]

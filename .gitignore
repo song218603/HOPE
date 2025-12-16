@@ -1,3 +1,5 @@
 *.pyc
 DATA/
 .vscode/
+3rd/
+MANO/

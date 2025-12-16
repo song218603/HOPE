@@ -1,0 +1,107 @@
+{
+    "DexYCB" : 
+    {
+        "20200709-subject-01" : 
+        {
+            "20200709_141754" : 
+            {
+                "836212060125" : 
+                [
+                    "align_depth_to_color_000000.png",
+                    "align_depth_to_color_000001.png",
+                    "...",
+                    "color_000000.jpg",
+                    "color_000001.jpg",
+                    "...",
+                    "labels_000000.npz",
+                    "labels_000001.npz",
+                    "..."
+                ],
+                "839512060362" : {},
+                "meta" : "meta.yml"
+            },
+            "20200709_141841" : {}
+        },
+        "20200813-subject-02" : {},
+        "20200820-subject-03" : {},
+        "20200903-subject-04" : {},
+        "20200908-subject-05" : {},
+        "20200918-subject-06" : {},
+        "20200928-subject-07" : {},
+        "20201002-subject-08" : {},
+        "20201015-subject-09" : {},
+        "20201022-subject-10" : {},
+        "calibration" : 
+        {
+            "extrinsics_20200702_151821" : ["extrinsics.yml"],
+            "extrinsics_20200813_100608" : ["extrinsics.yml"],
+            "extrinsics_20200820_091149" : ["extrinsics.yml"],
+            "extrinsics_20200903_072753" : ["extrinsics.yml"],
+            "extrinsics_20200907_105926" : ["extrinsics.yml"],
+            "extrinsics_20200918_092020" : ["extrinsics.yml"],
+            "extrinsics_20200928_082347" : ["extrinsics.yml"],
+            "extrinsics_20201001_200551" : ["extrinsics.yml"],
+            "extrinsics_20201014_215638" : ["extrinsics.yml"],
+            "extrinsics_20201022_091549" : ["extrinsics.yml"],
+            "intrinsics" :
+            [
+                "836212060125_640x480.yml",
+                "839512060362_640x480.yml",
+                "840412060917_640x480.yml",
+                "841412060263_640x480.yml",
+                "932122060857_640x480.yml",
+                "932122060861_640x480.yml",
+                "932122061900_640x480.yml",
+                "932122062010_640x480.yml"
+            ],
+            "mano_20200514_142106_subject-09-right" : ["mano.yml"],
+            "mano_20200709_140042_subject-01-right" : ["mano.yml"],
+            "mano_20200807_132210_subject-07-right" : ["mano.yml"],
+            "mano_20200813_143449_subject-02-right" : ["mano.yml"],
+            "mano_20200820_133405_subject-03-right" : ["mano.yml"],
+            "mano_20200903_101911_subject-04-right" : ["mano.yml"],
+            "mano_20200908_140650_subject-05-right" : ["mano.yml"],
+            "mano_20200918_110920_subject-06-right" : ["mano.yml"],
+            "mano_20201002_103251_subject-08-right" : ["mano.yml"],
+            "mano_20201022_105224_subject-10-right" : ["mano.yml"]
+        },
+        "models" : 
+        {
+            "002_master_chef_can" : 
+            [
+               "002_master_chef_can.xml",
+               "master_chef_can.stl",
+               "points.xyz",
+               "texture_map_old.png",
+               "textured_map.png",
+               "textured_simple_low_res.pth",
+               "textured_simple_low_res.sdf",
+               "textured_simple.obj",
+               "textured_simple.obj.mtl",
+               "textured_simple.sdf",
+               "textured.mtl",
+               "textured.obj"
+            ],
+            "003_cracker_box" : [],
+            "004_suagr_box" : [],
+            "005_tomato_soup_can" : [],
+            "006_mustard_bottle" : [],
+            "007_tuna_fish_can" : [],
+            "008_pudding_box" : [],
+            "009_gelatin_box" : [],
+            "010_potted_mest_can" : [],
+            "011_banana" : [],
+            "019_pitcher_base" : [],
+            "021_bleach_cleanser" : [],
+            "024_bowl" : [],
+            "025_mug" : [],
+            "035_power_drill" : [],
+            "036_wood_block" : [],
+            "037_scissors" : [],
+            "040_large_marker" : [],
+            "051_large_large_clamp" : [],
+            "052_extra_large_clamp" : [],
+            "061_foam_brick" : []
+        }
+    }
+}
