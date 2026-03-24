@@ -133,47 +133,26 @@ class DexYCBDataset(Dataset):
     
     def __getitem__(self, idx):
         info = self.samples[idx]
-        
-        # 读取图像
+
         img = cv2.imread(info['img_path'])
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        # 读取深度
         depth = cv2.imread(info['depth_path'], cv2.IMREAD_ANYDEPTH)
         if depth is None:
             depth = np.zeros((img.shape[0], img.shape[1]), dtype=np.float32)
         else:
             depth = depth.astype(np.float32) / 1000.0
 
-        # 读取 Label
         data = np.load(info['label_path'])
-        
-        # --- 分割图处理 ---
-        # 0: BG, 255: Hand, 1~21: YCB Objects (ID)
         seg = data['seg']
-        
-        # --- 物体 Pose 处理 ---
-        # pose_y shape: [N_obj, 3, 4]
         pose_y = data['pose_y']
-        
-        # 获取当前帧存在的物体ID
         ycb_ids = info['ycb_ids']
-        
-        # 拆分 Pose
         obj_rots = pose_y[:, :3, :3]
         obj_trans = pose_y[:, :3, 3]
-        
-        # --- 手部 Pose 处理 ---
         pose_m = data['pose_m'].flatten() # [51]
         has_hand = not np.allclose(pose_m, 0)
-
-        # --- Key3D ---
         k3d = data['joint_3d'][0]
-
-        # --- Key2D ---
         k2d = data['joint_2d'][0]
-        
-        # --- 内参处理 ---
         K = self.intrinsics_cache.get(info['cam_serial'], np.eye(3))
 
         # 转换为 Tensor

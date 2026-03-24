@@ -3,3 +3,8 @@ DATA/
 .vscode/
 3rd/
 MANO/
+model/__pycache__/
+model/component/__pycache__/
+model/data/__pycache__/
+model/mano/__pycache__/
+*.mp4

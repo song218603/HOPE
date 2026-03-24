@@ -6,9 +6,8 @@ from yacs.config import CfgNode
 from mano.mano import MANO
 from losses import Keypoint2DLoss, Keypoint3DLoss, ParameterLoss
 from component.Aggreator import Aggreator
-from component.HandAwareDecoder import HandAwareDecoder
-from component.ObjectAwareDecoder import ObjectAwareDecoder
 from component.TemporalFilter import TemporalFilter
+from data.DexYCBDataset import DexYCBDataset
 
 
 class HOPE(pl.LightningModule):
