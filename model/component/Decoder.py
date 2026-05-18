@@ -108,22 +108,26 @@ class PoseDecoderLayer(nn.Module):
         return query
     
 
+def fourier_encode(x: torch.Tensor, num_freqs: int = 5) -> torch.Tensor:
+    """
+    Fourier 位置编码（纯计算，无可学习参数）。
+    x:       (B, C)
+    return:  (B, C * 2 * num_freqs)
+    """
+    freqs = (2 ** torch.arange(num_freqs, device=x.device, dtype=x.dtype))  # (L,)
+    x = x.unsqueeze(-1) * freqs          # (B, C, L)
+    x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)  # (B, C, 2L)
+    return x.flatten(1)                  # (B, C * 2L)
+
+
 class PoseDecoder(nn.Module):
     """
     General Pose Decoder (shared structure for Hand and Obj).
-    
-    Args:
-        num_queries:  number of learnable queries
-        dim:          feature dimension
-        num_layers:   number of [CA→SA→MLP] blocks
-        num_heads:    attention heads
-        output_dim:   final output dimension (e.g. 61 for MANO, 6 for obj)
-        ffn_dim:      hidden dim of FFN (default: 4*dim)
-        dropout:      dropout rate
+    query_dim: input query 维度（由子类决定）
     """
     def __init__(
         self,
-        num_queries: int,
+        query_dim: int,
         dim: int,
         num_layers: int,
         output_dim: int,
@@ -133,8 +137,8 @@ class PoseDecoder(nn.Module):
     ):
         super().__init__()
 
-        # Learnable MANO/Obj queries
-        self.queries = nn.Embedding(num_queries, dim)
+        # 将外部 query 投影到 dim
+        self.query_proj = nn.Linear(query_dim, dim)
 
         # Stacked decoder layers
         self.layers = nn.ModuleList([
@@ -142,7 +146,7 @@ class PoseDecoder(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Final MLP head: F' → F
+        # Final MLP head
         self.head = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, dim),
@@ -150,40 +154,37 @@ class PoseDecoder(nn.Module):
             nn.Linear(dim, output_dim),
         )
 
-    def forward(self, dino_features):
+    def forward(self, query_vec: torch.Tensor, dino_features: torch.Tensor):
         """
-        Args:
-            dino_features: (B, Nk, D)  ← DINOv2 patch tokens (frozen)
-        Returns:
-            F: (B, num_queries, output_dim)
+        query_vec:     (B, query_dim)   ← 由子类构造的 pose 向量
+        dino_features: (B, Nk, D)       ← DINOv2 输出
+        Returns:       (B, output_dim)
         """
-        B = dino_features.shape[0]
-
-        query = self.queries.weight.unsqueeze(0).expand(B, -1, -1)
+        query = self.query_proj(query_vec).unsqueeze(1)  # (B, 1, D)
 
         for layer in self.layers:
             query = layer(query, dino_features)
 
-        F = self.head(query)
-        return F
-    
+        return self.head(query).squeeze(1)               # (B, output_dim)
+
 
 class HandPoseDecoder(PoseDecoder):
     """
-    Output per query:
-        pose:  48  (15 joints + 1 global) × 3 axis-angle
-        shape: 10  MANO shape betas
-        trans:  3  root translation
-        total: 61
+    Stage 1 (default): query = th_jtr (B, 21, 3) flattened to (B, 63)
+    Stage 4 (query_dim override): query = feature vector (B, query_dim)
+    Output dict: {'pose': (B,48), 'shape': (B,10), 'trans': (B,3)}
     """
-    POSE_DIM = 48
-    SHAPE_DIM = 10
-    TRANS_DIM = 3
+    POSE_DIM   = 48
+    SHAPE_DIM  = 10
+    TRANS_DIM  = 3
     OUTPUT_DIM = POSE_DIM + SHAPE_DIM + TRANS_DIM  # 61
+    DEFAULT_QUERY_DIM = 21 * 3                      # 63
 
-    def __init__(self, dim, num_layers=6, num_heads=8, ffn_dim=None, dropout=0.0):
+    def __init__(self, dim, num_layers=6, num_heads=8, ffn_dim=None, dropout=0.0,
+                 query_dim: int = None):
+        actual_query_dim = query_dim if query_dim is not None else self.DEFAULT_QUERY_DIM
         super().__init__(
-            num_queries=1,       # one hand per frame
+            query_dim=actual_query_dim,
             dim=dim,
             num_layers=num_layers,
             output_dim=self.OUTPUT_DIM,
@@ -191,34 +192,39 @@ class HandPoseDecoder(PoseDecoder):
             ffn_dim=ffn_dim,
             dropout=dropout,
         )
+        self._custom_query = query_dim is not None
 
-    def forward(self, dino_features):
+    def forward(self, query: torch.Tensor, dino_features: torch.Tensor):
         """
-        Returns dict with parsed MANO params.
+        query:         (B, 21, 3) joint coords  — Stage 1 (default)
+                    or (B, query_dim) feature   — Stage 4 (query_dim override)
         dino_features: (B, Nk, D)
         """
-        F = super().forward(dino_features)  # (B, 1, 61)
-        F = F.squeeze(1)                    # (B, 61)
-
+        query_vec = query if self._custom_query else query.flatten(1)
+        F = super().forward(query_vec, dino_features)    # (B, 61)
         return {
-            "pose":  F[:, :self.POSE_DIM],                               # (B, 48)
-            "shape": F[:, self.POSE_DIM:self.POSE_DIM+self.SHAPE_DIM],   # (B, 10)
-            "trans": F[:, self.POSE_DIM+self.SHAPE_DIM:],                # (B, 3)
+            "pose":  F[:, :self.POSE_DIM],
+            "shape": F[:, self.POSE_DIM:self.POSE_DIM + self.SHAPE_DIM],
+            "trans": F[:, self.POSE_DIM + self.SHAPE_DIM:],
         }
 
 
 class ObjPoseDecoder(PoseDecoder):
     """
-    Output per query:
-        position: 3   (x, y, z)
-        rotation: 3   axis-angle
-        total:    6
+    Stage 1 (default): query = obj_pose (B, 6), Fourier-encoded to (B, 60)
+    Stage 4 (query_dim override): query = feature vector (B, query_dim)
+    Output dict: {'position': (B,3), 'rotation': (B,3)}
     """
-    OUTPUT_DIM = 6
+    OUTPUT_DIM   = 6
+    OBJ_POSE_DIM = 6
+    NUM_FREQS    = 5    # default Fourier freqs → query_dim = 6 * 2 * 5 = 60
 
-    def __init__(self, dim, num_layers=6, num_heads=8, ffn_dim=None, dropout=0.0):
+    def __init__(self, dim, num_layers=6, num_heads=8, ffn_dim=None, dropout=0.0,
+                 query_dim: int = None):
+        actual_query_dim = query_dim if query_dim is not None \
+            else self.OBJ_POSE_DIM * 2 * self.NUM_FREQS  # 60
         super().__init__(
-            num_queries=1,
+            query_dim=actual_query_dim,
             dim=dim,
             num_layers=num_layers,
             output_dim=self.OUTPUT_DIM,
@@ -226,16 +232,44 @@ class ObjPoseDecoder(PoseDecoder):
             ffn_dim=ffn_dim,
             dropout=dropout,
         )
+        self._custom_query = query_dim is not None
 
-    def forward(self, dino_features):
+    def forward(self, query: torch.Tensor, dino_features: torch.Tensor):
         """
-        Returns dict with parsed obj params.
+        query:         (B, 6) obj pose  — Stage 1 (default, Fourier-encoded internally)
+                    or (B, query_dim) feature — Stage 4 (query_dim override)
         dino_features: (B, Nk, D)
         """
-        F = super().forward(dino_features)  # (B, 1, 6)
-        F = F.squeeze(1)                    # (B, 6)
-
+        query_vec = query if self._custom_query \
+            else fourier_encode(query, self.NUM_FREQS)  # (B, 60)
+        F = super().forward(query_vec, dino_features)   # (B, 6)
         return {
-            "position": F[:, :3],  # (B, 3)
-            "rotation": F[:, 3:],  # (B, 3) axis-angle
+            "position": F[:, :3],
+            "rotation": F[:, 3:],
         }
+
+
+if __name__ == "__main__":
+    B, D = 2, 1024
+    dino_features = torch.randn(B, 1, D)   # DINOv2 CLS token → (B, 1, D)
+
+    # Hand: th_jtr 来自 ManoLayer，shape (B, 21, 3)
+    th_jtr   = torch.randn(B, 21, 3)
+    # Obj: position(3) + rotation(3)
+    obj_pose = torch.randn(B, 6)
+
+    hand_decoder = HandPoseDecoder(dim=D, num_layers=4, num_heads=8)
+    obj_decoder  = ObjPoseDecoder(dim=D,  num_layers=4, num_heads=8)
+
+    hand_out = hand_decoder(th_jtr, dino_features)
+    obj_out  = obj_decoder(obj_pose, dino_features)
+
+    print("=== HandPoseDecoder ===")
+    print(f"  query input:  th_jtr {th_jtr.shape} → flatten → (B, {21*3})")
+    for k, v in hand_out.items():
+        print(f"  {k}: {v.shape}")
+
+    print("=== ObjPoseDecoder ===")
+    print(f"  query input:  obj_pose {obj_pose.shape} → Fourier(L=5) → (B, {6*2*5})")
+    for k, v in obj_out.items():
+        print(f"  {k}: {v.shape}")

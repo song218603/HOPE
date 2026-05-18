@@ -1,328 +1,175 @@
-import json
+# -*- coding: utf-8 -*-
+"""
+Dry-run script: verifies dataset loading and model forward pass
+without any training.  Run from project root:
+    python test.py
+"""
+import sys
 import os
-import yaml
+sys.path.insert(0, 'model')
+
 import numpy as np
+# chumpy compatibility patch for newer numpy
+np.bool    = np.bool_
+np.int     = np.int_
+np.float   = np.float64
+np.complex = np.complex128
+np.object  = object
+np.str     = np.str_
+np.unicode = np.str_
 
-_SUBJECTS = [
-    '20200709-subject-01',
-    '20200813-subject-02',
-    '20200820-subject-03',
-    '20200903-subject-04',
-    '20200908-subject-05',
-    '20200918-subject-06',
-    '20200928-subject-07',
-    '20201002-subject-08',
-    '20201015-subject-09',
-    '20201022-subject-10',
-]
+import torch
+from yacs.config import CfgNode as CN
 
-_SERIALS = [
-    '836212060125',
-    '839512060362',
-    '840412060917',
-    '841412060263',
-    '932122060857',
-    '932122060861',
-    '932122061900',
-    '932122062010',
-]
 
-_YCB_CLASSES = {
-     1: '002_master_chef_can',
-     2: '003_cracker_box',
-     3: '004_sugar_box',
-     4: '005_tomato_soup_can',
-     5: '006_mustard_bottle',
-     6: '007_tuna_fish_can',
-     7: '008_pudding_box',
-     8: '009_gelatin_box',
-     9: '010_potted_meat_can',
-    10: '011_banana',
-    11: '019_pitcher_base',
-    12: '021_bleach_cleanser',
-    13: '024_bowl',
-    14: '025_mug',
-    15: '035_power_drill',
-    16: '036_wood_block',
-    17: '037_scissors',
-    18: '040_large_marker',
-    19: '051_large_clamp',
-    20: '052_extra_large_clamp',
-    21: '061_foam_brick',
-}
+# ── Config ────────────────────────────────────────────────────────────────────
 
-_MANO_JOINTS = [
-    'wrist',
-    'thumb_mcp',
-    'thumb_pip',
-    'thumb_dip',
-    'thumb_tip',
-    'index_mcp',
-    'index_pip',
-    'index_dip',
-    'index_tip',
-    'middle_mcp',
-    'middle_pip',
-    'middle_dip',
-    'middle_tip',
-    'ring_mcp',
-    'ring_pip',
-    'ring_dip',
-    'ring_tip',
-    'little_mcp',
-    'little_pip',
-    'little_dip',
-    'little_tip'
-]
+def build_cfg() -> CN:
+    cfg = CN()
 
-_MANO_JOINT_CONNECT = [
-    [0,  1], [ 1,  2], [ 2,  3], [ 3,  4],
-    [0,  5], [ 5,  6], [ 6,  7], [ 7,  8],
-    [0,  9], [ 9, 10], [10, 11], [11, 12],
-    [0, 13], [13, 14], [14, 15], [15, 16],
-    [0, 17], [17, 18], [18, 19], [19, 20],
-]
+    cfg.MANO = CN()
+    cfg.MANO.ROOT           = 'MANO'
+    cfg.MANO.USE_PCA        = False
+    cfg.MANO.FLAT_HAND_MEAN = True
+    cfg.MANO.SIDE           = 'right'
 
-_BOP_EVAL_SUBSAMPLING_FACTOR = 4
+    cfg.MODEL = CN()
+    cfg.MODEL.BACKBONE       = 'dinov2_vitl14_reg'
+    cfg.MODEL.DECODER_LAYERS = 6
+    cfg.MODEL.DECODER_HEADS  = 8
+    cfg.MODEL.DROPOUT        = 0.0
+    cfg.MODEL.AGG_DIM        = 256
+    cfg.MODEL.AGG_LAYERS     = 2
+    cfg.MODEL.TS_LAYERS      = 2
+    cfg.MODEL.TS_WINDOW      = 4
+    cfg.MODEL.T_CONTEXT      = 8
 
-class DexYCBDataset():
-  """DexYCB dataset."""
-  ycb_classes = _YCB_CLASSES
-  mano_joints = _MANO_JOINTS
-  mano_joint_connect = _MANO_JOINT_CONNECT
+    cfg.TRAIN = CN()
+    cfg.TRAIN.LR           = 1e-4
+    cfg.TRAIN.WEIGHT_DECAY = 1e-4
+    cfg.TRAIN.LOSS_JOINTS3D = 300.0
+    cfg.TRAIN.LOSS_JOINTS2D = 300.0
+    cfg.TRAIN.LOSS_POSE     = 60.0
+    cfg.TRAIN.LOSS_TRANS    = 60.0
+    cfg.TRAIN.LOSS_OBJ_POS  = 10.0
+    cfg.TRAIN.LOSS_OBJ_ROT  = 10.0
+    cfg.TRAIN.LOSS_COARSE   = 0.5
 
-  def __init__(self, setup, split):
-    """Constructor.
+    return cfg
 
-    Args:
-      setup: Setup name. 's0', 's1', 's2', or 's3'.
-      split: Split name. 'train', 'val', or 'test'.
-    """
-    self._setup = setup
-    self._split = split
 
-    assert 'DEX_YCB_DIR' in os.environ, "environment variable 'DEX_YCB_DIR' is not set"
-    self._data_dir = os.environ['DEX_YCB_DIR']
-    self._calib_dir = os.path.join(self._data_dir, "calibration")
-    self._model_dir = os.path.join(self._data_dir, "models")
+# ── Test 1: Dataset ───────────────────────────────────────────────────────────
 
-    self._color_format = "color_{:06d}.jpg"
-    self._depth_format = "aligned_depth_to_color_{:06d}.png"
-    self._label_format = "labels_{:06d}.npz"
-    self._h = 480
-    self._w = 640
+def test_dataset():
+    print("── Test 1: DexYCB dataset ────────────────────────────────────")
+    os.environ['DEX_YCB_DIR'] = r'D:\BUAA\dex-ycb'
+    from data.DexYCBDataset import DexYCBDataset
 
-    self._obj_file = {
-        k: os.path.join(self._model_dir, v, "textured_simple.obj")
-        for k, v in _YCB_CLASSES.items()
+    ds = DexYCBDataset(split='train')
+    img, depth, target = ds[0]
+
+    print(f"  total samples : {len(ds)}")
+    print(f"  img           : {tuple(img.shape)}   dtype={img.dtype}")
+    print(f"  depth         : {tuple(depth.shape)} dtype={depth.dtype}")
+    print(f"  joint_3d      : {tuple(target['joint_3d'].shape)}")
+    print(f"  joint_2d      : {tuple(target['joint_2d'].shape)}")
+    print(f"  mano_pca      : {tuple(target['mano_pca'].shape)}")
+    print(f"  has_hand      : {target['has_hand'].item()}")
+    print(f"  K             :\n{target['K'].numpy()}")
+    print("  PASS\n")
+    return img.shape[-2], img.shape[-1]   # H, W
+
+
+# ── Test 2: Model forward pass ────────────────────────────────────────────────
+
+def test_model(cfg: CN, H: int, W: int, device: torch.device):
+    print("── Test 2: Model forward pass ────────────────────────────────")
+    from hope import HOPE
+
+    print("  Building model... (DINOv2 may download on first run)")
+    model = HOPE(cfg).to(device)
+    model.eval()
+
+    n_trainable = sum(p.numel() for p in model.get_parameters())
+    n_total     = sum(p.numel() for p in model.parameters())
+    print(f"  Total params     : {n_total:>12,}")
+    print(f"  Trainable params : {n_trainable:>12,}  (backbone frozen)")
+
+    B = 2
+    T = cfg.MODEL.T_CONTEXT      # 8
+    batch = {'image': torch.randn(B, T, 3, H, W, device=device)}
+    print(f"\n  Input  : (B={B}, T={T}, C=3, H={H}, W={W})")
+
+    with torch.no_grad():
+        out = model.forward_step(batch)
+
+    print("\n  Outputs:")
+    for k, v in out.items():
+        print(f"    {k:<22} {tuple(v.shape)}")
+
+    # Shape assertions
+    assert out['hand_params_coarse'].shape == (B, T, 61),    "hand_params_coarse"
+    assert out['obj_params_coarse'].shape  == (B, T, 6),     "obj_params_coarse"
+    assert out['joints_3d_coarse'].shape   == (B, T, 21, 3), "joints_3d_coarse"
+    assert out['hand_params'].shape        == (B, T, 61),    "hand_params"
+    assert out['obj_params'].shape         == (B, T, 6),     "obj_params"
+    assert out['joints_3d'].shape          == (B, T, 21, 3), "joints_3d"
+
+    if device.type == 'cuda':
+        mem_mb = torch.cuda.max_memory_allocated(device) / 1024 ** 2
+        print(f"\n  Peak GPU memory  : {mem_mb:.1f} MB")
+
+    print("  All shape assertions passed")
+    print("  PASS\n")
+
+
+# ── Test 3: training_step (loss computation) ─────────────────────────────────
+
+def test_training_step(cfg: CN, H: int, W: int, device: torch.device):
+    print("── Test 3: training_step (loss computation) ──────────────────")
+    from hope import HOPE
+
+    model = HOPE(cfg).to(device)
+    model.train()
+
+    B = 2
+    T = cfg.MODEL.T_CONTEXT   # 8
+
+    batch = {
+        'image'     : torch.randn(B, T, 3, H, W,    device=device),
+        'joint_3d'  : torch.randn(B, T, 21, 3,      device=device),
+        'joint_2d'  : torch.rand (B, T, 21, 2,      device=device) * 640,
+        'has_hand'  : torch.ones (B, T,              device=device),
+        'mano_pose' : torch.randn(B, T, 48,          device=device),
+        'mano_trans': torch.randn(B, T, 3,           device=device),
+        'obj_trans' : torch.randn(B, T, 3,           device=device),
+        'obj_rot'   : torch.eye(3, device=device)
+                          .unsqueeze(0).unsqueeze(0)
+                          .expand(B, T, 3, 3).contiguous(),
+        'K'         : torch.tensor(
+                          [[525., 0., 320.],
+                           [0., 525., 240.],
+                           [0.,   0.,   1.]], device=device
+                      ).unsqueeze(0).unsqueeze(0).expand(B, T, 3, 3).contiguous(),
     }
 
-    # Seen subjects, camera views, grasped objects.
-    if self._setup == 's0':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i % 5 != 4]
-      if self._split == 'val':
-        subject_ind = [0, 1]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i % 5 == 4]
-      if self._split == 'test':
-        subject_ind = [2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i % 5 == 4]
-
-    # Unseen subjects.
-    if self._setup == 's1':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = list(range(100))
-      if self._split == 'val':
-        subject_ind = [6]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = list(range(100))
-      if self._split == 'test':
-        subject_ind = [7, 8]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = list(range(100))
-
-    # Unseen camera views.
-    if self._setup == 's2':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5]
-        sequence_ind = list(range(100))
-      if self._split == 'val':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [6]
-        sequence_ind = list(range(100))
-      if self._split == 'test':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [7]
-        sequence_ind = list(range(100))
-
-    # Unseen grasped objects.
-    if self._setup == 's3':
-      if self._split == 'train':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [
-            i for i in range(100) if i // 5 not in (3, 7, 11, 15, 19)
-        ]
-      if self._split == 'val':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i // 5 in (3, 19)]
-      if self._split == 'test':
-        subject_ind = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        serial_ind = [0, 1, 2, 3, 4, 5, 6, 7]
-        sequence_ind = [i for i in range(100) if i // 5 in (7, 11, 15)]
-
-    self._subjects = [_SUBJECTS[i] for i in subject_ind]
-
-    self._serials = [_SERIALS[i] for i in serial_ind]
-    self._intrinsics = []
-    for s in self._serials:
-      intr_file = os.path.join(self._calib_dir, "intrinsics",
-                               "{}_{}x{}.yml".format(s, self._w, self._h))
-      with open(intr_file, 'r') as f:
-        intr = yaml.load(f, Loader=yaml.FullLoader)
-      intr = intr['color']
-      self._intrinsics.append(intr)
-
-    self._sequences = []
-    self._mapping = []
-    self._ycb_ids = []
-    self._ycb_grasp_ind = []
-    self._mano_side = []
-    self._mano_betas = []
-    offset = 0
-    for n in self._subjects:
-      seq = sorted(os.listdir(os.path.join(self._data_dir, n)))
-      seq = [os.path.join(n, s) for s in seq]
-      assert len(seq) == 100
-      seq = [seq[i] for i in sequence_ind]
-      self._sequences += seq
-      for i, q in enumerate(seq):
-        meta_file = os.path.join(self._data_dir, q, "meta.yml")
-        with open(meta_file, 'r') as f:
-          meta = yaml.load(f, Loader=yaml.FullLoader)
-        c = np.arange(len(self._serials))
-        f = np.arange(meta['num_frames'])
-        f, c = np.meshgrid(f, c)
-        c = c.ravel()
-        f = f.ravel()
-        s = (offset + i) * np.ones_like(c)
-        m = np.vstack((s, c, f)).T
-        self._mapping.append(m)
-        self._ycb_ids.append(meta['ycb_ids'])
-        self._ycb_grasp_ind.append(meta['ycb_grasp_ind'])
-        self._mano_side.append(meta['mano_sides'][0])
-        mano_calib_file = os.path.join(self._data_dir, "calibration", "mano_{}".format(meta['mano_calib'][0]), "mano.yml")
-        with open(mano_calib_file, 'r') as f:
-          mano_calib = yaml.load(f, Loader=yaml.FullLoader)
-        self._mano_betas.append(mano_calib['betas'])
-      offset += len(seq)
-    self._mapping = np.vstack(self._mapping)
-
-  def __len__(self):
-    return len(self._mapping)
-
-  def __getitem__(self, idx):
-    s, c, f = self._mapping[idx]
-    d = os.path.join(self._data_dir, self._sequences[s], self._serials[c])
-    sample = {
-        'color_file': os.path.join(d, self._color_format.format(f)),
-        'depth_file': os.path.join(d, self._depth_format.format(f)),
-        'label_file': os.path.join(d, self._label_format.format(f)),
-        'intrinsics': self._intrinsics[c],
-        'ycb_ids': self._ycb_ids[s],
-        'ycb_grasp_ind': self._ycb_grasp_ind[s],
-        'mano_side': self._mano_side[s],
-        'mano_betas': self._mano_betas[s],
-    }
-    if self._split == 'test':
-      sample['is_bop_target'] = (f % _BOP_EVAL_SUBSAMPLING_FACTOR == 0).item()
-      id_next = idx + _BOP_EVAL_SUBSAMPLING_FACTOR
-      is_last = (id_next >= len(self._mapping) or
-                 (np.any(self._mapping[id_next][:2] != [s, c])).item())
-      sample['is_grasp_target'] = sample['is_bop_target'] and is_last
-    return sample
-
-  @property
-  def data_dir(self):
-    return self._data_dir
-
-  @property
-  def h(self):
-    return self._h
-
-  @property
-  def w(self):
-    return self._w
-
-  @property
-  def obj_file(self):
-    return self._obj_file
-
-  def get_bop_id_from_idx(self, idx):
-    """Returns the BOP scene ID and image ID given an index.
-
-    Args:
-      idx: Index of sample.
-
-    Returns:
-      scene_id: BOP scene ID.
-      im_id: BOP image ID.
-    """
-    s, c, f = map(lambda x: x.item(), self._mapping[idx])
-    scene_id = s * len(self._serials) + c
-    im_id = f
-    return scene_id, im_id
-
-_sets = {}
-
-for setup in ('s0', 's1', 's2', 's3'):
-  for split in ('train', 'val', 'test'):
-    name = '{}_{}'.format(setup, split)
-    _sets[name] = (lambda setup=setup, split=split: DexYCBDataset(setup, split))
+    loss = model.training_step(batch, batch_idx=0)
+    print(f"  loss = {loss.item():.4f}")
+    assert loss.isfinite(), "Loss is not finite!"
+    print("  PASS\n")
 
 
-def get_dataset(name):
-  """Gets a dataset by name.
-
-  Args:
-    name: Dataset name. E.g., 's0_test'.
-
-  Returns:
-    A dataset.
-
-  Raises:
-    KeyError: If name is not supported.
-  """
-  if name not in _sets:
-    raise KeyError('Unknown dataset name: {}'.format(name))
-  return _sets[name]()
-
-def main():
-  for setup in ('s0', 's1', 's2', 's3'):
-    for split in ('train', 'val', 'test'):
-      name = '{}_{}'.format(setup, split)
-      print('Dataset name: {}'.format(name))
-
-      dataset = get_dataset(name)
-
-      print('Dataset size: {}'.format(len(dataset)))
-
-      sample = dataset[999]
-      print('1000th sample:')
-      print(json.dumps(sample, indent=4))
-
-def checknpz(filepath):
-    data = np.load(filepath)
-    print(data.files)
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    checknpz('/workspace/HOPE/DATA/DexYCB/20200709-subject-01/20200709_141754/836212060125/labels_000000.npz')
-    # checknpz('/workspace/HOPE/DATA/DexYCB/20200709-subject-01/20200709_141754/pose.npz')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device : {device}")
+    print(f"PyTorch: {torch.__version__}\n")
+
+    cfg = build_cfg()
+
+    H, W = test_dataset()
+    test_model(cfg, H, W, device)
+    test_training_step(cfg, H, W, device)
+
+    print("OK  Dry run completed successfully")

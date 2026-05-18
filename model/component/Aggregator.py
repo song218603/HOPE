@@ -55,11 +55,6 @@ class AggregatorLayer(nn.Module):
         ffn_dim = ffn_dim or dim * 2
 
         # ── input projection ─────────────────────────────────────────────────
-        self.input_proj = nn.Sequential(
-            nn.Conv1d(in_dim, dim, kernel_size=1),
-            nn.LayerNorm(dim),          # applied after transpose
-        )
-        # We'll handle LayerNorm manually (needs (B,T,D) layout)
         self.input_conv  = nn.Conv1d(in_dim, dim, kernel_size=1)
         self.input_norm  = nn.LayerNorm(dim)
 
@@ -164,38 +159,45 @@ class Aggregator(nn.Module):
             for i in range(num_layers)
         ])
 
-        # Output heads: project aggregated feature to hand / obj branches
-        self.hand_out_proj = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-        )
-        self.obj_out_proj = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-        )
-
     def forward(self, hand_pose, obj_pose):
         """
         Args:
             hand_pose : (B, T, hand_dim)
             obj_pose  : (B, T, obj_dim)
         Returns:
-            hand_feat : (B, T, dim)
-            obj_feat  : (B, T, dim)
+            x : (B, T, dim)  融合特征
         """
-        # ── Concat hand & obj along feature dim ──────────────────────────────
         x = torch.cat([hand_pose, obj_pose], dim=-1)   # (B, T, hand_dim+obj_dim)
-
-        # ── Stacked aggregator layers ─────────────────────────────────────────
         for layer in self.layers:
             x = layer(x)                               # (B, T, dim)
+        return x
 
-        # ── Split into hand / obj branches ───────────────────────────────────
-        hand_feat = self.hand_out_proj(x)              # (B, T, dim)
-        obj_feat  = self.obj_out_proj(x)               # (B, T, dim)
 
-        return hand_feat, obj_feat
-    
+class HandAggregator(Aggregator):
+    """
+    输出 hand 分支特征: (B, T, dim)
+    """
+    def __init__(self, hand_dim, obj_dim, dim, num_layers=2, ffn_dim=None, dropout=0.0):
+        super().__init__(hand_dim, obj_dim, dim, num_layers, ffn_dim, dropout)
+        self.out_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
+
+    def forward(self, hand_pose, obj_pose):
+        x = super().forward(hand_pose, obj_pose)   # (B, T, dim)
+        return self.out_proj(x)
+
+
+class ObjAggregator(Aggregator):
+    """
+    输出 obj 分支特征: (B, T, dim)
+    """
+    def __init__(self, hand_dim, obj_dim, dim, num_layers=2, ffn_dim=None, dropout=0.0):
+        super().__init__(hand_dim, obj_dim, dim, num_layers, ffn_dim, dropout)
+        self.out_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim))
+
+    def forward(self, hand_pose, obj_pose):
+        x = super().forward(hand_pose, obj_pose)   # (B, T, dim)
+        return self.out_proj(x)
+
 
 if __name__ == '__main__':
     import time
@@ -203,53 +205,37 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}\n")
 
-    # ── Config ────────────────────────────────────────────────────────────────
     BATCH_SIZE = 2
-    AGG_DIM    = 256   # aggregator internal dim
+    AGG_DIM    = 256
     NUM_LAYERS = 2
+    HAND_DIM   = 61   # 48 pose + 10 shape + 3 trans
+    OBJ_DIM    = 6    # 3 position + 3 rotation
+    T_LIST     = [8, 16, 32]
 
-    # Hand pose: 61 (48 pose + 10 shape + 3 trans)
-    # Obj  pose:  6 (3 position + 3 rotation)
-    HAND_DIM = 61
-    OBJ_DIM  = 6
+    hand_agg = HandAggregator(hand_dim=HAND_DIM, obj_dim=OBJ_DIM, dim=AGG_DIM, num_layers=NUM_LAYERS, dropout=0.1).to(device)
+    obj_agg  = ObjAggregator( hand_dim=HAND_DIM, obj_dim=OBJ_DIM, dim=AGG_DIM, num_layers=NUM_LAYERS, dropout=0.1).to(device)
 
-    # Variable-length sequence test
-    T_LIST = [8, 16, 32]
-
-    # ── Build model ───────────────────────────────────────────────────────────
-    model = Aggregator(
-        hand_dim=HAND_DIM,
-        obj_dim=OBJ_DIM,
-        dim=AGG_DIM,
-        num_layers=NUM_LAYERS,
-        dropout=0.1,
-    ).to(device)
-
-    total_params = sum(p.numel() for p in model.parameters())
     print("=" * 55)
-    print(f"  Aggregator params : {total_params:>10,}")
+    print(f"  HandAggregator params : {sum(p.numel() for p in hand_agg.parameters()):>10,}")
+    print(f"  ObjAggregator  params : {sum(p.numel() for p in obj_agg.parameters()):>10,}")
     print("=" * 55)
 
-    # ── Variable-length forward pass ──────────────────────────────────────────
-    print("\n  Variable-length sequence test (eval mode)")
+    # ── Shape test ────────────────────────────────────────────────────────────
+    print("\n  Shape test (eval mode)")
     print("-" * 55)
-    model.eval()
+    hand_agg.eval()
+    obj_agg.eval()
     with torch.no_grad():
         for T in T_LIST:
-            hand_pose = torch.randn(BATCH_SIZE, T, HAND_DIM).to(device)
-            obj_pose  = torch.randn(BATCH_SIZE, T, OBJ_DIM).to(device)
+            hand_pose = torch.randn(BATCH_SIZE, T, HAND_DIM, device=device)
+            obj_pose  = torch.randn(BATCH_SIZE, T, OBJ_DIM,  device=device)
 
-            t0 = time.time()
-            hand_feat, obj_feat = model(hand_pose, obj_pose)
-            elapsed = (time.time() - t0) * 1000
+            hand_feat = hand_agg(hand_pose, obj_pose)
+            obj_feat  = obj_agg(hand_pose, obj_pose)
 
-            print(f"  T={T:>3d} | "
-                  f"hand_feat={tuple(hand_feat.shape)}  "
-                  f"obj_feat={tuple(obj_feat.shape)}  "
-                  f"| {elapsed:.2f} ms")
-
-            assert hand_feat.shape == (BATCH_SIZE, T, AGG_DIM), "hand_feat shape mismatch"
-            assert obj_feat.shape  == (BATCH_SIZE, T, AGG_DIM), "obj_feat shape mismatch"
+            print(f"  T={T:>3d} | hand_feat={tuple(hand_feat.shape)}  obj_feat={tuple(obj_feat.shape)}")
+            assert hand_feat.shape == (BATCH_SIZE, T, AGG_DIM)
+            assert obj_feat.shape  == (BATCH_SIZE, T, AGG_DIM)
 
     print("\n  All shape assertions passed OK")
 
@@ -257,22 +243,19 @@ if __name__ == '__main__':
     print("\n" + "-" * 55)
     print("  Gradient Flow Check (training mode)")
     print("-" * 55)
-    model.train()
+    hand_agg.train()
+    obj_agg.train()
     T = 16
-    hand_pose = torch.randn(BATCH_SIZE, T, HAND_DIM, requires_grad=True).to(device)
-    obj_pose  = torch.randn(BATCH_SIZE, T, OBJ_DIM,  requires_grad=True).to(device)
+    hand_pose = torch.randn(BATCH_SIZE, T, HAND_DIM, device=device, requires_grad=True)
+    obj_pose  = torch.randn(BATCH_SIZE, T, OBJ_DIM,  device=device, requires_grad=True)
 
-    hand_feat, obj_feat = model(hand_pose, obj_pose)
+    hand_feat = hand_agg(hand_pose, obj_pose)
+    obj_feat  = obj_agg(hand_pose, obj_pose)
     loss = hand_feat.mean() + obj_feat.mean()
     loss.backward()
 
-    has_grad = all(
-        p.grad is not None
-        for p in model.parameters() if p.requires_grad
-    )
-    print(f"  All parameters received gradients: {has_grad}  "
-          + ("OK" if has_grad else "WARNING!"))
+    has_grad = all(p.grad is not None for p in list(hand_agg.parameters()) + list(obj_agg.parameters()) if p.requires_grad)
+    print(f"  All parameters received gradients: {has_grad}  " + ("OK" if has_grad else "WARNING!"))
     print(f"  hand_pose.grad shape : {hand_pose.grad.shape}")
     print(f"  obj_pose.grad  shape : {obj_pose.grad.shape}")
-
     print("\n  Demo completed successfully.\n")

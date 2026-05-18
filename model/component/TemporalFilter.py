@@ -6,7 +6,8 @@ import torch.nn.functional as F
 
 class KinematicTemporalPosEmbedding(nn.Module):
     def __init__(self, num_slots, max_frames, dim, use_kinematic=True):
-        ...
+        super().__init__()
+        self.num_slots = num_slots
         # 所有 branch 都有
         self.temporal_emb = nn.Parameter(torch.zeros(num_slots, max_frames, dim))
         self.slot_emb     = nn.Parameter(torch.zeros(num_slots, 1, dim))  # 替代 kinematic
@@ -52,17 +53,22 @@ class TemporalSplitterLayer(nn.Module):
         )
         self.ffn_norm = nn.LayerNorm(dim)
 
-    def forward(self, x):
-        # x: (B, N, C)
+    def forward(self, x: torch.Tensor, window_mask: torch.Tensor = None):
+        """
+        x           : (B, N, C)   N = num_slots * T
+        window_mask : (N, N) float, 1 = allowed, 0 = masked out
+        """
         h   = self.norm(x)
-        h_t = h.transpose(1, 2)                        # (B, C, N)
-        Q   = self.q_conv(h_t).transpose(1, 2)        # (B, N, C)
+        h_t = h.transpose(1, 2)                         # (B, C, N)
+        Q   = self.q_conv(h_t).transpose(1, 2)         # (B, N, C)
         K   = self.k_conv(h_t).transpose(1, 2)
         V   = self.v_conv(h_t).transpose(1, 2)
 
-        attn = F.relu((Q @ K.transpose(-2, -1)) * self.scale)  # ReLU!
+        attn = F.relu((Q @ K.transpose(-2, -1)) * self.scale)  # (B, N, N)
+        if window_mask is not None:
+            attn = attn * window_mask                   # zero-out out-of-window pairs
         attn = self.dropout(attn)
-        R    = x + attn @ V                            # residual 1
+        R    = x + attn @ V                             # residual
 
         ffn_out = self.ffn(R.transpose(1, 2)).transpose(1, 2)
         return self.ffn_norm(R + ffn_out)
@@ -75,20 +81,22 @@ class TemporalSplitter(nn.Module):
     输出: S 个 (B, T, C) 细化特征流
     """
     def __init__(
-            self, 
+            self,
             dim: int,
             num_slots: int = 3,
             num_layers: int = 2,
             max_frames: int = 512,
             ffn_dim: int = None,
             dropout: float = 0.0,
-            use_kinematic=True
+            use_kinematic: bool = True,
+            window_size: int = 4,
             ):
         super().__init__()
-        self.dim       = dim
-        self.num_slots = num_slots
-        self.pos_emb   = KinematicTemporalPosEmbedding(num_slots, max_frames, dim, use_kinematic)
-        self.layers    = nn.ModuleList([
+        self.dim         = dim
+        self.num_slots   = num_slots
+        self.window_size = window_size
+        self.pos_emb = KinematicTemporalPosEmbedding(num_slots, max_frames, dim, use_kinematic)
+        self.layers  = nn.ModuleList([
             TemporalSplitterLayer(dim, ffn_dim, dropout) for _ in range(num_layers)
         ])
         self.psi = nn.ModuleList([
@@ -96,13 +104,41 @@ class TemporalSplitter(nn.Module):
             for _ in range(num_slots)
         ])
 
-    def forward(self, F_list):
-        # F_list: list of S tensors (B, T, C)
+    def _build_window_mask(self, T: int, device: torch.device) -> torch.Tensor:
+        """
+        Build a (S*T, S*T) float mask where entry [i, j] = 1 if the time
+        distance between token i and token j is within window_size, else 0.
+
+        Token layout: [slot0_t0, slot0_t1, ..., slot0_tT-1,
+                       slot1_t0, ...,            slot1_tT-1, ...]
+        Time index of token i: i % T  (slot index: i // T)
+        Cross-slot attention is allowed as long as |t_i - t_j| <= window_size.
+        """
+        N = self.num_slots * T
+        t_idx = torch.arange(N, device=device) % T          # (N,)
+        diff  = (t_idx.unsqueeze(0) - t_idx.unsqueeze(1)).abs()  # (N, N)
+        return (diff <= self.window_size).float()            # (N, N)
+
+    def forward(self, F_list: list) -> list:
+        """
+        F_list : S tensors of shape (B, T, C)
+        Returns: S tensors of shape (B, T, C)
+        Each frame t attends only to frames [t-window_size, t+window_size]
+        across all slots.
+        """
         B, T, C = F_list[0].shape
+
+        # Stack slots → (B, S*T, C)
+        # Token order: all frames of slot-0 first, then slot-1, …
         x = torch.stack(F_list, dim=1).reshape(B, self.num_slots * T, C)
         x = self.pos_emb(x, T)
+
+        # Precompute windowed mask once per T (cached if T is constant)
+        mask = self._build_window_mask(T, x.device)        # (S*T, S*T)
+
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, mask)
+
         x = x.reshape(B, self.num_slots, T, C)
         return [self.psi[s](x[:, s]) for s in range(self.num_slots)]
     

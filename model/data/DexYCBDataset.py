@@ -124,7 +124,9 @@ class DexYCBDataset(Dataset):
                             'label_path': label_path,
                             'cam_serial': cam_serial,
                             'ycb_ids': seq_ycb_ids,
-                            'sample_name': f"{subj}_{seq}_{cam_serial}_{frame_id}"
+                            'sample_name': f"{subj}_{seq}_{cam_serial}_{frame_id}",
+                            'seq_key': f"{subj}_{seq}_{cam_serial}",
+                            'frame_idx': int(frame_id),
                         })
         return samples
 
